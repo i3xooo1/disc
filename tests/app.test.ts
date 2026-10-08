@@ -10,6 +10,7 @@ import { DemoGateway } from '../src/gateway.js';
 import { createApp } from '../src/app.js';
 import { ResetService } from '../src/reset.js';
 import type { Actor, Job } from '../src/types.js';
+import { DiscordCooldownError } from '../src/errors.js';
 
 const origin = 'http://localhost:3000';
 async function fixture(gateway = new DemoGateway()) {
@@ -31,6 +32,20 @@ async function waitForJob(store:Store,id:string):Promise<Job> {
   for(let i=0;i<100;i++) {const job=store.job(id)!;if(!['queued','running'].includes(job.status)) return job;await new Promise(r=>setTimeout(r,5));}
   throw new Error('Reset did not complete');
 }
+
+test('member cooldown returns a retry deadline while preserving the authenticated session', async () => {
+  const f = await fixture();
+  try {
+    const auth = await f.login(f.owner.key);
+    assert.equal((await f.request('/overview', auth)).status, 200);
+    f.gateway.snapshot = async () => { throw new DiscordCooldownError(27); };
+    const response = await f.request('/overview', auth);
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('retry-after'), '27');
+    assert.equal(response.body.retryAfter, 27);
+    assert.equal((await f.request('/session', auth)).status, 200);
+  } finally { await f.close(); }
+});
 
 test('dashboard auth, origin protection, CSRF, and owner-only key management',async()=>{
   const f=await fixture();

@@ -9,6 +9,7 @@ import type { Actor, Gateway } from './types.js';
 import type { Store } from './store.js';
 import { Workspace, WorkspaceError } from './workspace.js';
 import type { GuildContext } from './workspace.js';
+import { DiscordCooldownError } from './errors.js';
 
 type Options = { origin: string; secure: boolean; proxy: number; guildId?: string; dataRoot?: string };
 const snowflake = z.string().regex(/^\d{17,20}$/, 'Enter a valid Discord ID');
@@ -123,6 +124,7 @@ export function createApp(store: Store, gateway: Gateway, options: Options) {
   app.use('/api', (_req,res) => res.status(404).json({ error: 'Endpoint not found' }));
   app.use(express.static(fileURLToPath(new URL('../public', import.meta.url)), { index: 'index.html' }));
   app.use((error: unknown, _req: Request, res: express.Response, _next: express.NextFunction) => {
+    if (error instanceof DiscordCooldownError) { res.set('Retry-After', String(error.retryAfter)); res.status(503).json({ error: error.message, retryAfter: error.retryAfter }); return; }
     if (error instanceof WorkspaceError) { res.status(error.status).json({ error: error.message }); return; }
     if (error instanceof z.ZodError) { res.status(400).json({ error: error.issues.map(i => i.message).join('; ') }); return; }
     const message = error instanceof Error ? error.message : 'Operation failed';
@@ -130,4 +132,3 @@ export function createApp(store: Store, gateway: Gateway, options: Options) {
   });
   return app;
 }
-

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Client, Guild } from 'discord.js';
-import { PermissionsBitField } from 'discord.js';
+import { Collection, PermissionsBitField } from 'discord.js';
+import { DiscordCooldownError } from '../src/errors.js';
 import { DiscordGateway } from '../src/gateway.js';
 
 function adapter() {
@@ -38,4 +39,80 @@ test('live adapter skips old messages during purge and protects bot-assigned rol
   assert.equal(f.calls[1]!.action,'delete-role');
   f.channel.deletable=false;
   await assert.rejects(()=>f.gateway.resetTarget('channel','100000000000000100','Reset'),/not deletable/);
+});
+
+function snapshotAdapter() {
+  const member = { id: '100000000000000010', displayName: 'Sophie', displayAvatarURL: () => null, user: { bot: false }, bannable: true, kickable: true, moderatable: true, timedOut: false, isCommunicationDisabled() { return this.timedOut; } };
+  const cache = new Collection([[member.id, member]]);
+  const controls = { fetches: 0, action: async () => {} };
+  const guild = {
+    id: '100000000000000001', name: 'Test server', ownerId: '100000000000000002', iconURL: () => null,
+    members: { cache, fetch: async () => { controls.fetches++; await controls.action(); return cache; }, fetchMe: async () => ({ id: '100000000000000003', roles: { cache: new Set() } }) },
+    channels: { fetch: async () => new Collection() }, roles: { fetch: async () => new Collection() }
+  };
+  return { gateway: new DiscordGateway({} as Client, guild as unknown as Guild), cache, member, controls };
+}
+
+test('concurrent refreshes share one member fetch and subsequent snapshots use live cache updates', async t => {
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const f = snapshotAdapter();
+  let release!: () => void;
+  f.controls.action = () => new Promise<void>(resolve => { release = resolve; });
+  const requests = Array.from({ length: 5 }, () => f.gateway.snapshot());
+  assert.equal(f.controls.fetches, 1);
+  release(); await Promise.all(requests);
+  f.controls.action = async () => {};
+  now += 59000;
+  f.member.timedOut = true;
+  f.cache.set('100000000000000011', { ...f.member, id: '100000000000000011', displayName: 'New member' });
+  const updated = await f.gateway.snapshot();
+  assert.equal(updated.members.length, 2);
+  assert.equal(updated.members[0]!.timedOut, true);
+  assert.equal(f.controls.fetches, 1);
+  f.cache.delete(f.member.id);
+  assert.equal((await f.gateway.snapshot()).members.length, 1);
+  now += 2000;
+  await f.gateway.snapshot();
+  assert.equal(f.controls.fetches, 2);
+});
+
+test('initial rate limit blocks early retries without presenting a partial member list', async t => {
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const f = snapshotAdapter();
+  f.controls.action = async () => { throw Object.assign(new Error('rate limited'), { data: { opcode: 8, retry_after: 25.528 } }); };
+  await assert.rejects(() => f.gateway.snapshot(), e => e instanceof DiscordCooldownError && e.retryAfter === 27);
+  now += 10000;
+  await assert.rejects(() => f.gateway.snapshot(), e => e instanceof DiscordCooldownError && e.retryAfter === 17);
+  assert.equal(f.controls.fetches, 1);
+  f.controls.action = async () => {};
+  now += 18000;
+  assert.equal((await f.gateway.snapshot()).members.length, 1);
+  assert.equal(f.controls.fetches, 2);
+});
+
+test('rate limited resync keeps the complete cache usable until Discord permits another request', async t => {
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const f = snapshotAdapter();
+  await f.gateway.snapshot();
+  now += 61000;
+  f.controls.action = async () => { throw Object.assign(new Error('rate limited'), { data: { opcode: 8, retry_after: 30 } }); };
+  assert.equal((await f.gateway.snapshot()).members.length, 1);
+  await f.gateway.snapshot();
+  assert.equal(f.controls.fetches, 2);
+  now += 32000;
+  f.controls.action = async () => {};
+  await f.gateway.snapshot();
+  assert.equal(f.controls.fetches, 3);
+});
+
+test('failed initial member fetch can recover without a stuck pending request', async () => {
+  const f = snapshotAdapter();
+  f.controls.action = async () => { throw new Error('Connection lost'); };
+  await assert.rejects(() => f.gateway.snapshot(), /Connection lost/);
+  f.controls.action = async () => {};
+  assert.equal((await f.gateway.snapshot()).members.length, 1);
+  assert.equal(f.controls.fetches, 2);
 });

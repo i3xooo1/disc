@@ -108,3 +108,26 @@ test('server switching clears old previews, preserves the selection, and ignores
   await expect(page.getByRole('heading', { name: 'Your community, at a glance.' })).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test('member rate limit shows a countdown, prevents repeated requests, and recovers', async ({ page }) => {
+  let requests = 0;
+  await page.route('**/api/overview', async route => {
+    requests++;
+    if (requests === 1) await route.fulfill({ status: 503, contentType: 'application/json', headers: { 'Retry-After': '3' }, body: JSON.stringify({ error: 'Discord is temporarily limiting member requests. Wait for the countdown, then try again.', retryAfter: 3 }) });
+    else await route.continue();
+  });
+  await page.goto('/');
+  await page.getByLabel('Dashboard access key').fill(ownerKey);
+  await page.getByRole('button', { name: 'Enter dashboard' }).click();
+  await expect(page.getByRole('heading', { name: 'Couldn’t load your server' })).toBeVisible();
+  const retry = page.locator('#content [data-command="refresh"]');
+  await expect(retry).toBeDisabled();
+  await expect(retry).toContainText('Try again in');
+  await expect(page.getByRole('button', { name: 'Refresh server data' })).toBeDisabled();
+  await page.waitForTimeout(1100);
+  expect(requests).toBe(1);
+  await expect(retry).toBeEnabled({ timeout: 5000 });
+  await retry.click();
+  await expect(page.getByRole('heading', { name: 'Your community, at a glance.' })).toBeVisible();
+  expect(requests).toBe(2);
+});

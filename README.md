@@ -74,6 +74,8 @@ Demo and live keys are isolated. `DISCORD_GUILD_ID` identifies the default serve
 
 Warnings are stored in this dashboard’s database and do not send a DM. Bans do not erase message history. Unbanning does not automatically rejoin the member.
 
+Member lists are cached per server and updated by Discord events, with full synchronization at most once a minute. Concurrent dashboard refreshes share that synchronization. If Discord limits a request before the initial list has loaded, the dashboard shows a retry countdown; repeated clicks do not send more member requests during the cooldown.
+
 ## Reset behavior
 
 Anyone with a valid staff or owner key can preview and execute reset in a server they can access. A preview lasts five minutes, belongs to the server and key that created it, and is single-use. Switching servers discards the displayed preview. Creating a preview does not mutate Discord. Confirmation requires the exact server name and `RESET SERVER`.

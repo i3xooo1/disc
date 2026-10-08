@@ -28,11 +28,23 @@ const titles = { overview:'Overview', members:'Members', channels:'Channels & ro
 const actionNames = { warn:'Warn member', timeout:'Timeout member', untimeout:'Remove timeout', kick:'Kick member', ban:'Ban member', unban:'Unban member', purge:'Clear messages' };
 let session = null, data = null, page = 'overview', plan = null, currentJob = null, pollTimer = null, toastTimer = null;
 let selectedGuild = '', guilds = [], switching = false, pendingWrites = 0, guildVersion = 0;
+const guildCooldowns = new Map();
+let refreshCount = 0, cooldownTimer = null;
 function updateServerPicker() { $('#server-select').disabled = switching || pendingWrites > 0 || !guilds.length; }
+function updateRefreshControls() {
+  clearTimeout(cooldownTimer);
+  const seconds = Math.max(0, Math.ceil(((guildCooldowns.get(selectedGuild) || 0) - Date.now()) / 1000));
+  $('#refresh').disabled = refreshCount > 0 || seconds > 0;
+  const retry = $('#content [data-command="refresh"]');
+  if (retry) { retry.disabled = refreshCount > 0 || seconds > 0; retry.textContent = seconds ? `Try again in ${seconds} seconds` : 'Try again'; }
+  if (seconds && session) cooldownTimer = setTimeout(updateRefreshControls, 1000);
+}
 
 async function api(path, options = {}) {
   const scoped = !['/login','/logout','/session','/guilds'].includes(path);
   const version = guildVersion;
+  const guildId = selectedGuild;
+  if (['/overview','/reset/preview'].includes(path) && (guildCooldowns.get(guildId) || 0) > Date.now()) throw new Error('Discord is temporarily limiting member requests. Wait for the countdown, then try again.');
   const write = scoped && ['POST','DELETE','PUT','PATCH'].includes(options.method);
   if (write) { pendingWrites++; updateServerPicker(); }
   try {
@@ -40,7 +52,13 @@ async function api(path, options = {}) {
     const result = await response.json();
     if (scoped && version !== guildVersion) throw new Error('Server changed; stale response ignored.');
     if (response.status === 401 && path !== '/login') { signOutUI(); throw new Error('Your session ended. Sign in again.'); }
-    if (!response.ok) throw new Error(result.error || 'The request could not be completed');
+    if (!response.ok) {
+      if (typeof result.retryAfter === 'number' && Number.isFinite(result.retryAfter) && result.retryAfter > 0) {
+        guildCooldowns.set(guildId, Date.now() + result.retryAfter * 1000);
+        updateRefreshControls();
+      }
+      throw new Error(result.error || 'The request could not be completed');
+    }
     return result;
   } finally { if (write) { pendingWrites--; updateServerPicker(); } }
 }
@@ -52,6 +70,7 @@ function toast(message, error = false) {
 }
 function signOutUI() {
   session = null; data = null; plan = null; currentJob = null; clearTimeout(pollTimer);
+  clearTimeout(cooldownTimer);
   guildVersion++; selectedGuild = ''; guilds = []; switching = false; $('#server-select').replaceChildren(); updateServerPicker();
   clearTimeout(toastTimer); $('#toast').hidden = true;
   $('#sidebar').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded','false');
@@ -113,7 +132,7 @@ async function switchServer(id) {
   finally { switching = false; updateServerPicker(); }
 }
 async function refresh() {
-  const button = $('#refresh'); button.disabled = true;
+  refreshCount++; updateRefreshControls();
   const version = guildVersion;
   try {
     const result = await api('/overview');
@@ -128,7 +147,7 @@ async function refresh() {
   } catch (error) {
     if (session && version === guildVersion) $('#content').innerHTML = `<div class="error-panel"><h2>Couldn’t load your server</h2><p>${escape(error.message)}</p><button class="button" data-command="refresh">Try again</button></div>`;
     throw error;
-  } finally { button.disabled = false; }
+  } finally { refreshCount--; updateRefreshControls(); }
 }
 function navigate(next) {
   page = next; if (page !== 'reset') plan = null;
@@ -296,4 +315,3 @@ document.addEventListener('click',async e=>{
   }catch(error){toast(error.message,true);}
 });
 api('/session').then(result=>{session=result;return enter();}).catch(e=>{if(session)toast(e.message,true);});
-

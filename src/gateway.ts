@@ -1,9 +1,13 @@
 import { Client, GatewayIntentBits, PermissionsBitField, ChannelType } from 'discord.js';
 import type { Guild } from 'discord.js';
 import type { Action, Gateway, Snapshot, GuildSummary } from './types.js';
+import { DiscordCooldownError } from './errors.js';
 
 export class DiscordGateway implements Gateway {
   demo = false;
+  private membersLoaded = false;
+  private nextMemberFetchAt = 0;
+  private memberFetch: Promise<void> | null = null;
   constructor(private client: Client, private guild: Guild, private ownsClient = true) {}
   static async connect(token: string, guildId: string) {
     const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildModeration, GatewayIntentBits.GuildMessages] });
@@ -30,13 +34,44 @@ export class DiscordGateway implements Gateway {
     return new DiscordGateway(this.client, guild, false);
   }
   async snapshot(): Promise<Snapshot> {
-    const [members, channels, roles, me] = await Promise.all([this.guild.members.fetch(), this.guild.channels.fetch(), this.guild.roles.fetch(), this.guild.members.fetchMe()]);
+    await this.ensureMembers();
+    const [channels, roles, me] = await Promise.all([this.guild.channels.fetch(), this.guild.roles.fetch(), this.guild.members.fetchMe()]);
+    // discord.js keeps joins, departures, member updates, and timeouts current in this cache.
+    const members = this.guild.members.cache;
     return {
       id: this.guild.id, name: this.guild.name, icon: this.guild.iconURL(), ownerId: this.guild.ownerId, botId: me.id,
       members: members.map(m => ({ id: m.id, name: m.displayName, avatar: m.displayAvatarURL({ size: 64 }), bot: m.user.bot, bannable: m.bannable && m.id !== me.id, kickable: m.kickable && m.id !== me.id, moderatable: m.moderatable && m.id !== me.id, timedOut: m.isCommunicationDisabled(), protectedReason: m.id === this.guild.ownerId ? 'Server owner' : m.id === me.id ? 'This bot' : !m.bannable ? 'Bot permissions or role hierarchy' : undefined })),
       roles: roles.map(r => ({ id: r.id, name: r.name, editable: r.editable && !me.roles.cache.has(r.id), protectedReason: r.id === this.guild.id ? '@everyone' : r.managed ? 'Discord-managed role' : me.roles.cache.has(r.id) ? 'Role assigned to this bot' : !r.editable ? 'Bot permissions or role hierarchy' : undefined })),
       channels: channels.filter(c => c !== null).map(c => ({ id: c.id, name: c.name, type: ChannelType[c.type], deletable: c.deletable, text: c.isTextBased() && 'bulkDelete' in c, protectedReason: !c.deletable ? 'Missing Manage Channels permission' : undefined }))
     };
+  }
+  private async ensureMembers() {
+    if (this.memberFetch) return this.memberFetch;
+    if (Date.now() < this.nextMemberFetchAt) {
+      if (this.membersLoaded) return;
+      throw new DiscordCooldownError(Math.ceil((this.nextMemberFetchAt - Date.now()) / 1000));
+    }
+    // A full member request has its own Gateway limit. Share concurrent requests
+    // and resync at most once a minute; never discard a complete list on a 429.
+    this.nextMemberFetchAt = Date.now() + 60000;
+    this.memberFetch = (async () => {
+      try {
+        await this.guild.members.fetch();
+        this.membersLoaded = true;
+        this.nextMemberFetchAt = Date.now() + 60000;
+      } catch (error) {
+        const data = (error as { data?: { opcode?: number; retry_after?: number } } | null)?.data;
+        if (data?.opcode === 8 && typeof data.retry_after === 'number' && Number.isFinite(data.retry_after) && data.retry_after >= 0) {
+          const retryAfter = Math.ceil(data.retry_after) + 1;
+          this.nextMemberFetchAt = Date.now() + retryAfter * 1000;
+          if (!this.membersLoaded) throw new DiscordCooldownError(retryAfter);
+        } else {
+          this.nextMemberFetchAt = 0;
+          throw error;
+        }
+      }
+    })();
+    try { await this.memberFetch; } finally { this.memberFetch = null; }
   }
   async moderate(action: Action, target: string, reason: string, amount?: number) {
     if (action === 'unban') { await this.guild.bans.remove(target, reason); return 'Member unbanned'; }
