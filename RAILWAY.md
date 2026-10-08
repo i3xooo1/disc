@@ -15,11 +15,13 @@ These files prepare deployment; they do not create a Railway project, allocate a
 | --- | --- |
 | `DEMO_MODE` | `false` |
 | `DISCORD_TOKEN` | Your actual Discord bot token; keep it secret |
-| `DISCORD_GUILD_ID` | Your Discord server ID |
+| `DISCORD_GUILD_ID` | Your default Discord server ID; keep the existing value to preserve dashboard keys |
 
 Railway supplies `PORT`; don't replace it with a fixed port. Keep one replica and one volume per service. Disable sleeping/serverless operation: the Discord bot needs a continuously running outbound WebSocket connection. Use Railway's HTTPS ingress for the dashboard; do not add another public TCP endpoint.
 
 The bot requires Server Members Intent and the Discord permissions/role order documented in [README.md](README.md). Live startup fails clearly if the token, guild ID, or Discord connection is unusable. A successful `/api/health` response in live mode means the service reached startup after connecting to Discord, but does not prove each moderation permission works.
+
+Invite this same bot to any additional Discord servers. Owner keys can select all connected servers from the sidebar; reload the dashboard after inviting the bot. Staff keys are limited to the server selected when they were generated, and existing staff keys retain access to the default server. Each server has its own warnings, logs, reset previews, and jobs under `/data/live-<server-id>/`. Dashboard authentication stays in the default server's database. No extra service or token is needed.
 
 ## First dashboard sign-in
 
@@ -31,7 +33,7 @@ Alternatively, after deployment, open a Railway shell/SSH session **in the runni
 node dist/scripts/create-key.js "Server owner"
 ```
 
-Copy the displayed owner key directly to a password manager, then sign in at the Railway dashboard domain. Generate staff keys under **Access keys**. Anyone with a valid key can moderate and reset the configured server.
+Copy the displayed owner key directly to a password manager, then sign in at the Railway dashboard domain. Select the intended server and generate staff keys under **Access keys**. Anyone with a valid key can moderate and reset servers that key can access.
 
 With an authenticated Railway CLI, `railway ssh` can open the running service's shell. `railway run` launches locally and does **not** write to the deployed volume; don't use it to bootstrap the deployed dashboard. Owner keys are never generated at every deployment or printed in normal application startup logs.
 

@@ -17,6 +17,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS plans(id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, data TEXT NOT NULL);
     `);
+    const columns = this.db.prepare('PRAGMA table_info(keys)').all();
+    if (!columns.some(column => column.name === 'guild_id')) this.db.exec('ALTER TABLE keys ADD COLUMN guild_id TEXT');
   }
   bootstrapOwner(keyHash: string) {
     if (!/^[a-f0-9]{64}$/.test(keyHash)) throw new Error('BOOTSTRAP_OWNER_KEY_SHA256 must be a SHA-256 hash');
@@ -25,26 +27,26 @@ export class Store {
       .run(randomUUID(), keyHash, 'Server owner', 1, null, Date.now());
     return true;
   }
-  issueKey(label: string, owner = false, days: number | null = 30) {
+  issueKey(label: string, owner = false, days: number | null = 30, guildId: string | null = null) {
     const key = `disc_${randomBytes(32).toString('base64url')}`;
     const id = randomUUID();
-    this.db.prepare('INSERT INTO keys(id,hash,label,owner,expires,created) VALUES(?,?,?,?,?,?)').run(id, hash(key), label, Number(owner), days === null ? null : Date.now() + days * 86400000, Date.now());
+    this.db.prepare('INSERT INTO keys(id,hash,label,owner,expires,created,guild_id) VALUES(?,?,?,?,?,?,?)').run(id, hash(key), label, Number(owner), days === null ? null : Date.now() + days * 86400000, Date.now(), owner ? null : guildId);
     return { id, key, label };
   }
-  keys() { return this.db.prepare('SELECT id,label,owner,expires,revoked,created FROM keys ORDER BY created DESC').all(); }
+  keys() { return this.db.prepare('SELECT id,label,owner,expires,revoked,created,guild_id FROM keys ORDER BY created DESC').all(); }
   revoke(id: string) { return this.db.prepare('UPDATE keys SET revoked=1 WHERE id=? AND owner=0').run(id).changes > 0; }
   login(key: string) {
-    const row = this.db.prepare('SELECT id,label,owner FROM keys WHERE hash=? AND revoked=0 AND (expires IS NULL OR expires>?)').get(hash(key), Date.now()) as { id: string; label: string; owner: number } | undefined;
+    const row = this.db.prepare('SELECT id,label,owner,guild_id FROM keys WHERE hash=? AND revoked=0 AND (expires IS NULL OR expires>?)').get(hash(key), Date.now()) as { id: string; label: string; owner: number; guild_id: string | null } | undefined;
     if (!row) return null;
     const token = randomBytes(32).toString('base64url');
     const csrf = randomBytes(32).toString('base64url');
     this.db.prepare('DELETE FROM sessions WHERE expires<=?').run(Date.now());
     this.db.prepare('INSERT INTO sessions VALUES(?,?,?,?)').run(hash(token), row.id, csrf, Date.now() + 8 * 3600000);
-    return { token, csrf, actor: { id: row.id, label: row.label, owner: !!row.owner } };
+    return { token, csrf, actor: { id: row.id, label: row.label, owner: !!row.owner, ...(row.guild_id ? { guildId: row.guild_id } : {}) } };
   }
   session(token: string): { actor: Actor; csrf: string } | null {
-    const row = this.db.prepare(`SELECT k.id,k.label,k.owner,s.csrf FROM sessions s JOIN keys k ON k.id=s.key_id WHERE s.hash=? AND s.expires>? AND k.revoked=0 AND (k.expires IS NULL OR k.expires>?)`).get(hash(token), Date.now(), Date.now()) as { id: string; label: string; owner: number; csrf: string } | undefined;
-    return row ? { actor: { id: row.id, label: row.label, owner: !!row.owner }, csrf: row.csrf } : null;
+    const row = this.db.prepare(`SELECT k.id,k.label,k.owner,k.guild_id,s.csrf FROM sessions s JOIN keys k ON k.id=s.key_id WHERE s.hash=? AND s.expires>? AND k.revoked=0 AND (k.expires IS NULL OR k.expires>?)`).get(hash(token), Date.now(), Date.now()) as { id: string; label: string; owner: number; csrf: string; guild_id: string | null } | undefined;
+    return row ? { actor: { id: row.id, label: row.label, owner: !!row.owner, ...(row.guild_id ? { guildId: row.guild_id } : {}) }, csrf: row.csrf } : null;
   }
   logout(token: string) { this.db.prepare('DELETE FROM sessions WHERE hash=?').run(hash(token)); }
   audit(actor: Actor, action: string, target: string, reason: string, status = 'success') {

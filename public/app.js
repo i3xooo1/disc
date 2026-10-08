@@ -27,21 +27,32 @@ document.querySelectorAll('[data-icon]').forEach(el => el.innerHTML = icon(el.da
 const titles = { overview:'Overview', members:'Members', channels:'Channels & roles', logs:'Activity log', reset:'Reset server', keys:'Access keys' };
 const actionNames = { warn:'Warn member', timeout:'Timeout member', untimeout:'Remove timeout', kick:'Kick member', ban:'Ban member', unban:'Unban member', purge:'Clear messages' };
 let session = null, data = null, page = 'overview', plan = null, currentJob = null, pollTimer = null, toastTimer = null;
+let selectedGuild = '', guilds = [], switching = false, pendingWrites = 0, guildVersion = 0;
+function updateServerPicker() { $('#server-select').disabled = switching || pendingWrites > 0 || !guilds.length; }
 
 async function api(path, options = {}) {
-  const response = await fetch(`/api${path}`, { credentials:'same-origin', ...options, headers:{ 'Content-Type':'application/json', ...(session?.csrf ? { 'X-CSRF-Token':session.csrf } : {}), ...options.headers } });
-  const result = await response.json();
-  if (response.status === 401 && path !== '/login') { signOutUI(); throw new Error('Your session ended. Sign in again.'); }
-  if (!response.ok) throw new Error(result.error || 'The request could not be completed');
-  return result;
+  const scoped = !['/login','/logout','/session','/guilds'].includes(path);
+  const version = guildVersion;
+  const write = scoped && ['POST','DELETE','PUT','PATCH'].includes(options.method);
+  if (write) { pendingWrites++; updateServerPicker(); }
+  try {
+    const response = await fetch(`/api${path}`, { credentials:'same-origin', ...options, headers:{ 'Content-Type':'application/json', ...(session?.csrf ? { 'X-CSRF-Token':session.csrf } : {}), ...(scoped && selectedGuild ? { 'X-Discord-Guild-ID': selectedGuild } : {}), ...options.headers } });
+    const result = await response.json();
+    if (scoped && version !== guildVersion) throw new Error('Server changed; stale response ignored.');
+    if (response.status === 401 && path !== '/login') { signOutUI(); throw new Error('Your session ended. Sign in again.'); }
+    if (!response.ok) throw new Error(result.error || 'The request could not be completed');
+    return result;
+  } finally { if (write) { pendingWrites--; updateServerPicker(); } }
 }
 const post = (path, body) => api(path, { method:'POST', body:JSON.stringify(body) });
 function toast(message, error = false) {
+  if (message === 'Server changed; stale response ignored.') return;
   clearTimeout(toastTimer); $('#toast').textContent = message; $('#toast').classList.toggle('error', error); $('#toast').hidden = false;
   toastTimer = setTimeout(() => $('#toast').hidden = true, error ? 9000 : 5500);
 }
 function signOutUI() {
   session = null; data = null; plan = null; currentJob = null; clearTimeout(pollTimer);
+  guildVersion++; selectedGuild = ''; guilds = []; switching = false; $('#server-select').replaceChildren(); updateServerPicker();
   clearTimeout(toastTimer); $('#toast').hidden = true;
   $('#sidebar').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded','false');
   $('#dashboard').hidden = true; $('#login').hidden = false; $('#access-key').value = '';
@@ -73,19 +84,49 @@ async function enter() {
   $('#mode-badge').className = `badge ${session.demo ? 'purple-badge' : 'green-badge'}`;
   $('#mode-card').innerHTML = `<span class="live-dot"></span><div><strong>${session.demo ? 'Demo workspace' : 'Bot connected'}</strong><span>${session.demo ? 'No real Discord actions' : 'Discord actions are live'}</span></div><span>${icon('shield')}</span>`;
   $('#content').innerHTML = '<div class="loading">Connecting to your workspace…</div>';
+  const available = await api('/guilds');
+  guilds = available.guilds;
+  let saved = '';
+  try { saved = sessionStorage.getItem(`disc-server-${session.actor.id}`) || ''; } catch {}
+  selectedGuild = guilds.some(g => g.id === saved) ? saved : guilds.some(g => g.id === available.defaultGuildId) ? available.defaultGuildId : guilds[0]?.id || '';
+  $('#server-select').innerHTML = guilds.map(g => `<option value="${escape(g.id)}">${escape(g.name)}</option>`).join('');
+  $('#server-select').value = selectedGuild; updateServerPicker();
+  if (!selectedGuild) { $('#content').innerHTML = '<div class="empty">No connected servers are available for this key.</div>'; return; }
   await refresh();
+}
+async function switchServer(id) {
+  if (switching || pendingWrites) { $('#server-select').value = selectedGuild; return; }
+  if (id === selectedGuild || !guilds.some(g => g.id === id)) return;
+  switching = true; guildVersion++; selectedGuild = id; data = null; plan = null; currentJob = null; page = 'overview';
+  clearTimeout(pollTimer);
+  if ($('#modal').open) $('#modal').close();
+  $('#sidebar').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded','false');
+  $('#server-name').textContent = guilds.find(g => g.id === id).name;
+  $('#server-avatar').textContent = initials(guilds.find(g => g.id === id).name).slice(0,1);
+  $('#nav-count').textContent = '0';
+  $('#content').innerHTML = '<div class="loading">Loading your server…</div>';
+  updateServerPicker();
+  try {
+    try { sessionStorage.setItem(`disc-server-${session.actor.id}`, id); } catch {}
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+  finally { switching = false; updateServerPicker(); }
 }
 async function refresh() {
   const button = $('#refresh'); button.disabled = true;
+  const version = guildVersion;
   try {
-    data = await api('/overview');
+    const result = await api('/overview');
+    if (version !== guildVersion) return;
+    data = result;
     $('#server-name').textContent = data.guild.name; $('#server-avatar').textContent = initials(data.guild.name).slice(0,1);
     $('#nav-count').textContent = data.guild.members.length; $('#refresh-time').textContent = `Updated ${new Date().toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}`;
     const running = data.jobs.find(j => j.status === 'running' || j.status === 'queued');
     if (running) { currentJob = running; schedulePoll(); }
+    else if (currentJob && ['queued','running'].includes(currentJob.status)) { currentJob = data.jobs.find(j => j.id === currentJob.id) || null; clearTimeout(pollTimer); }
     render();
   } catch (error) {
-    if (session) $('#content').innerHTML = `<div class="error-panel"><h2>Couldn’t load your server</h2><p>${escape(error.message)}</p><button class="button" data-command="refresh">Try again</button></div>`;
+    if (session && version === guildVersion) $('#content').innerHTML = `<div class="error-panel"><h2>Couldn’t load your server</h2><p>${escape(error.message)}</p><button class="button" data-command="refresh">Try again</button></div>`;
     throw error;
   } finally { button.disabled = false; }
 }
@@ -159,10 +200,11 @@ function renderReset() {
   });
 }
 async function renderKeys() {
+  const version = guildVersion;
   if (!session.actor.owner) { navigate('overview'); return; }
-  $('#content').innerHTML = heading('A private door to your dashboard.', 'Create a key for each trusted person. Revoke access whenever you need.', `<button class="button primary" data-command="key-new">${icon('plus')} Generate key</button>`) + '<div class="notice">'+icon('key')+'<div><strong>A key grants full moderation and reset access.</strong><p>Use a separate key per person and share it privately. Activity is attributed to the key’s label, not a verified Discord identity. Only owner keys can manage access.</p></div></div><div id="key-list" class="loading">Loading access keys…</div>';
+  $('#content').innerHTML = heading('A private door to your dashboard.', 'Create a key for each trusted person. Revoke access whenever you need.', `<button class="button primary" data-command="key-new">${icon('plus')} Generate key</button>`) + '<div class="notice">'+icon('key')+'<div><strong>Staff keys grant moderation and reset access to the selected server.</strong><p>Use a separate key per person and share it privately. Activity is attributed to the key’s label, not a verified Discord identity. Only owner keys can manage access.</p></div></div><div id="key-list" class="loading">Loading access keys…</div>';
   try {
-    const keys = await api('/keys'); if (page !== 'keys') return;
+    const keys = await api('/keys'); if (page !== 'keys' || version !== guildVersion) return;
     $('#key-list').outerHTML = panel('Access keys',`${keys.filter(k=>!k.revoked && (!k.expires || k.expires>Date.now())).length} active keys`,`<div class="table-scroll"><table class="keys-table"><thead><tr><th>KEY LABEL</th><th>ACCESS</th><th>EXPIRES</th><th>STATUS</th><th></th></tr></thead><tbody>${keys.map(k=>`<tr><td>${escape(k.label)}<small class="field-note">Created ${escape(date(k.created))}</small></td><td><span class="badge ${k.owner?'purple-badge':'muted-badge'}">${k.owner?'OWNER':'MODERATOR'}</span></td><td>${k.expires?escape(date(k.expires)):'Never'}</td><td><span class="badge ${k.revoked||k.expires&&k.expires<Date.now()?'muted-badge':'green-badge'}">${k.revoked?'REVOKED':k.expires&&k.expires<Date.now()?'EXPIRED':'ACTIVE'}</span></td><td>${!k.owner&&!k.revoked?`<button class="button danger small" data-command="key-revoke" data-id="${escape(k.id)}">Revoke</button>`:''}</td></tr>`).join('')}</tbody></table></div>`,'','<span>Key values are shown once and stored only as hashes.</span>');
   } catch (error) { toast(error.message,true); }
 }
@@ -193,7 +235,7 @@ function moderationModal(memberId='', initialAction='warn', channelId='') {
   });
 }
 function newKey() {
-  openModal('Invite someone you trust',`<form id="key-form"><p class="description">This key grants moderation and server reset access. Choose a label that identifies the person using it.</p><div class="field"><label for="key-label">Key label</label><input id="key-label" name="label" placeholder="e.g. Sophie · moderation team" minlength="2" maxlength="60" required></div><div class="field"><label for="key-days">Expires in</label><select id="key-days" name="days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="365">1 year</option></select></div><p id="modal-error" class="form-error" role="alert"></p><div class="modal-actions"><button class="button" type="button" data-command="modal-close">Cancel</button><button class="button primary" type="submit">${icon('key')} Generate access key</button></div></form>`);
+  openModal('Invite someone you trust',`<form id="key-form"><p class="description">This key grants moderation and reset access to <strong>${escape(data.guild.name)}</strong> only. Choose a label that identifies the person using it.</p><div class="field"><label for="key-label">Key label</label><input id="key-label" name="label" placeholder="e.g. Sophie · moderation team" minlength="2" maxlength="60" required></div><div class="field"><label for="key-days">Expires in</label><select id="key-days" name="days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="365">1 year</option></select></div><p id="modal-error" class="form-error" role="alert"></p><div class="modal-actions"><button class="button" type="button" data-command="modal-close">Cancel</button><button class="button primary" type="submit">${icon('key')} Generate access key</button></div></form>`);
   $('#key-form').addEventListener('submit',async e=>{
     e.preventDefault(); const form=e.target;
     await submit(form,async()=>{
@@ -206,14 +248,15 @@ function newKey() {
 }
 function schedulePoll() {
   clearTimeout(pollTimer);
+  const version = guildVersion;
   pollTimer=setTimeout(async()=>{
-    if(!session||!currentJob) return;
+    if(!session||!currentJob||version !== guildVersion) return;
     try {
       currentJob=await api(`/jobs/${currentJob.id}`);
       if(page==='reset') renderReset();
       if(['queued','running'].includes(currentJob.status)) schedulePoll();
       else { toast(`Reset ${currentJob.status}: ${currentJob.succeeded} completed, ${currentJob.failed} failed.`); await refresh(); }
-    } catch(e) { toast(e.message,true); if(session) schedulePoll(); }
+    } catch(e) { toast(e.message,true); if(session && version === guildVersion) schedulePoll(); }
   },1500);
 }
 
@@ -221,6 +264,7 @@ $('#login-form').addEventListener('submit',async e=>{
   e.preventDefault();
   await submit(e.target,async()=>{ session=await post('/login',{key:$('#access-key').value.trim()}); $('#access-key').value=''; page='overview'; await enter(); },'#login-error');
 });
+$('#server-select').addEventListener('change', e => { void switchServer(e.target.value); });
 $('#logout').addEventListener('click',async()=>{try{await post('/logout',{}); signOutUI();}catch(e){toast(e.message,true);}});
 $('#refresh').addEventListener('click',()=>refresh().catch(e=>toast(e.message,true)));
 $('#mobile-menu').addEventListener('click',()=>{const open=$('#sidebar').classList.toggle('open'); $('#mobile-menu').setAttribute('aria-expanded',String(open));});
@@ -252,3 +296,4 @@ document.addEventListener('click',async e=>{
   }catch(error){toast(error.message,true);}
 });
 api('/session').then(result=>{session=result;return enter();}).catch(e=>{if(session)toast(e.message,true);});
+

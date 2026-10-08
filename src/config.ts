@@ -13,5 +13,5 @@ export function config() {
   if (!demo && (!process.env.DISCORD_TOKEN || !process.env.DISCORD_GUILD_ID)) throw new Error('Set DISCORD_TOKEN and DISCORD_GUILD_ID, or set DEMO_MODE=true for the safe demo');
   if (!demo && !/^\d{17,20}$/.test(process.env.DISCORD_GUILD_ID!)) throw new Error('DISCORD_GUILD_ID must be a Discord server ID');
   if (!demo && url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('A remote dashboard requires an HTTPS PUBLIC_ORIGIN');
-  return { demo, port, host, origin, proxy, secure: url.protocol === 'https:', dataDir: resolve(process.env.DATA_DIR || '.data', demo ? 'demo' : `live-${process.env.DISCORD_GUILD_ID}`), token: process.env.DISCORD_TOKEN || '', guildId: process.env.DISCORD_GUILD_ID || '' };
+  return { demo, port, host, origin, proxy, secure: url.protocol === 'https:', dataRoot: resolve(process.env.DATA_DIR || '.data'), dataDir: resolve(process.env.DATA_DIR || '.data', demo ? 'demo' : `live-${process.env.DISCORD_GUILD_ID}`), token: process.env.DISCORD_TOKEN || '', guildId: process.env.DISCORD_GUILD_ID || '' };
 }

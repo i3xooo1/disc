@@ -8,11 +8,12 @@ A private website dashboard for a Discord moderation bot. Built with Node.js 24+
 - Message cleanup in text channels (1–100 messages; Discord skips messages older than 14 days).
 - Channel and role directory, current timeouts, recent moderation activity, and an audit trail attributed to each access key.
 - Owner-generated, expiring staff keys. Revoking a key immediately invalidates its active sessions.
+- A server selector for every server the connected bot belongs to, with separate warnings, activity logs, reset previews, and reset jobs.
 - A reset workflow to ban eligible members, delete eligible roles, and delete eligible channels. Select any combination, review the actual target list, and confirm with the exact server name and `RESET SERVER`.
 - Reset progress, individual operation results, partial failure reporting, and interrupted-job detection after a restart.
 - A responsive dashboard and a demo that never contacts Discord.
 
-**Every valid dashboard key grants full moderation and reset access.** The owner key alone can generate and revoke staff keys. A key is a bearer credential: the label records which key acted, not proof of a Discord member’s identity. Share one key per trusted person, privately. The website is the command interface; no Discord slash commands are registered.
+**Every valid dashboard key grants full moderation and reset access within its assigned servers.** Owner keys can switch between all connected servers and alone can generate and revoke staff keys. A staff key grants access only to the server selected when it was generated. Existing staff keys remain assigned to the configured default server. A key is a bearer credential: the label records which key acted, not proof of a Discord member’s identity. Share one key per trusted person, privately. The website is the command interface; no Discord slash commands are registered.
 
 ## Try the demo
 
@@ -40,7 +41,7 @@ DEMO_MODE=true npm run key:create -- "Server owner"
 DEMO_MODE=true npm start
 ```
 
-The fake server resets to its starting members/channels whenever the demo process restarts. Demo keys and logs persist separately from live-server data.
+Both fake servers reset to their starting members/channels whenever the demo process restarts. Demo keys and logs persist separately from live-server data.
 
 ## Connect your Discord server
 
@@ -69,13 +70,13 @@ npm run key:create -- "Server owner"
 npm start
 ```
 
-Demo and live keys are isolated. Live storage is also isolated by server ID, so a key for one server does not grant access to another configured server. Create live staff keys through the dashboard.
+Demo and live keys are isolated. `DISCORD_GUILD_ID` identifies the default server and the database that stores dashboard authentication; keep it unchanged to preserve existing keys. Invite the same bot to additional servers and reload the dashboard to see them in the server selector. No extra bot token or Railway service is required. Owner keys cover all connected servers; create a staff key while its intended server is selected.
 
 Warnings are stored in this dashboard’s database and do not send a DM. Bans do not erase message history. Unbanning does not automatically rejoin the member.
 
 ## Reset behavior
 
-Anyone with a valid staff or owner key can preview and execute reset. A preview lasts five minutes, belongs to the key that created it, and is single-use. Creating a preview does not mutate Discord. Confirmation requires the exact server name and `RESET SERVER`.
+Anyone with a valid staff or owner key can preview and execute reset in a server they can access. A preview lasts five minutes, belongs to the server and key that created it, and is single-use. Switching servers discards the displayed preview. Creating a preview does not mutate Discord. Confirmation requires the exact server name and `RESET SERVER`.
 
 Execution bans members first, deletes roles second, and deletes channels last, with channel categories last. It operates sequentially through discord.js, which handles Discord API rate limits. Only IDs from the preview are targeted; resources created later are unaffected. The bot rechecks permission and hierarchy constraints before each operation. Failures are recorded individually and do not prevent the remaining targets from being attempted. Moderation operations are blocked while reset is running.
 
@@ -87,7 +88,7 @@ There is **no automatic rollback** or backup/restore feature. Deleted channels a
 
 For Railway, use the included production Dockerfile and follow [RAILWAY.md](RAILWAY.md) for the volume, domain, credentials, and initial owner key.
 
-Run **one service process per data directory**. Keep `.data` on persistent local storage and limit filesystem access to the service account. It contains key hashes, session hashes, and moderation history. Live guild data lives at `.data/live-<server-id>/` by default. It does not contain your raw staff keys or bot token.
+Run **one service process per data directory**. Keep `.data` on persistent local storage and limit filesystem access to the service account. It contains key hashes, session hashes, and moderation history. Live guild data lives at `.data/live-<server-id>/` by default; additional server directories are created when first opened. Authentication stays in the configured default server's database. It does not contain your raw staff keys or bot token.
 
 For remote use, put the service behind HTTPS and set `PUBLIC_ORIGIN` to your exact public origin, without a trailing slash. Set `TRUST_PROXY` to the precise number of trusted proxy hops (`1` for a single reverse proxy); leave `0` for direct/local access. Keep the Node service bound to `127.0.0.1` behind that proxy, or use your platform’s internal container network. Restrict direct access to the application port. Access keys and sessions must travel over HTTPS. Do not embed keys in URLs.
 

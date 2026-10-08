@@ -1,10 +1,10 @@
 import { Client, GatewayIntentBits, PermissionsBitField, ChannelType } from 'discord.js';
 import type { Guild } from 'discord.js';
-import type { Action, Gateway, Snapshot } from './types.js';
+import type { Action, Gateway, Snapshot, GuildSummary } from './types.js';
 
 export class DiscordGateway implements Gateway {
   demo = false;
-  constructor(private client: Client, private guild: Guild) {}
+  constructor(private client: Client, private guild: Guild, private ownsClient = true) {}
   static async connect(token: string, guildId: string) {
     const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildModeration, GatewayIntentBits.GuildMessages] });
     const ready = new Promise<void>((resolve, reject) => {
@@ -18,6 +18,16 @@ export class DiscordGateway implements Gateway {
       await guild.members.fetchMe();
       return new DiscordGateway(client, guild);
     } catch (e) { client.destroy(); throw e; }
+  }
+  async guilds(): Promise<GuildSummary[]> {
+    return this.client.guilds.cache.filter(g => g.available)
+      .map(g => ({ id: g.id, name: g.name, icon: g.iconURL() }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+  async forGuild(id: string): Promise<Gateway> {
+    if (!this.client.guilds.cache.has(id)) throw new Error('The bot is not in this server');
+    const guild = await this.client.guilds.fetch(id);
+    return new DiscordGateway(this.client, guild, false);
   }
   async snapshot(): Promise<Snapshot> {
     const [members, channels, roles, me] = await Promise.all([this.guild.members.fetch(), this.guild.channels.fetch(), this.guild.roles.fetch(), this.guild.members.fetchMe()]);
@@ -59,7 +69,7 @@ export class DiscordGateway implements Gateway {
     if (!channel || !('deletable' in channel) || !channel.deletable) throw new Error('Channel is missing or not deletable');
     await channel.delete(reason);
   }
-  async close() { this.client.destroy(); }
+  async close() { if (this.ownsClient) this.client.destroy(); }
 }
 
 export class DemoGateway implements Gateway {
@@ -92,4 +102,21 @@ export class DemoGateway implements Gateway {
     if (kind === 'channel') { if (!this.state.channels.find(c => c.id === id)?.deletable) throw new Error('Protected channel'); this.state.channels = this.state.channels.filter(c => c.id !== id); }
   }
   async close() {}
+}
+
+export class MultiDemoGateway extends DemoGateway {
+  private secondary = new DemoGateway();
+  constructor() {
+    super();
+    this.secondary.state.id = '100000000000000009';
+    this.secondary.state.name = 'The Daylight Collective';
+    this.secondary.state.channels = this.secondary.state.channels.map(c => ({ ...c, id: String(BigInt(c.id) + 1000n), name: `daylight-${c.name}` }));
+    this.secondary.state.roles = this.secondary.state.roles.map(r => ({ ...r, id: r.id === this.state.id ? this.secondary.state.id : String(BigInt(r.id) + 1000n) }));
+  }
+  async guilds(): Promise<GuildSummary[]> { return [this.state, this.secondary.state].map(g => ({ id: g.id, name: g.name, icon: g.icon })); }
+  async forGuild(id: string): Promise<Gateway> {
+    if (id === this.state.id) return this;
+    if (id === this.secondary.state.id) return this.secondary;
+    throw new Error('The bot is not in this server');
+  }
 }
