@@ -23,7 +23,9 @@ The bot requires Server Members Intent and the Discord permissions/role order do
 
 ## First dashboard sign-in
 
-After deployment, open a Railway shell/SSH session **in the running service with its volume mounted** and run:
+To provision the first owner key without SSH, generate a random 32-byte key locally with the `disc_` prefix and base64url encoding. Keep the raw key in a password manager and set only its lowercase SHA-256 hash as `BOOTSTRAP_OWNER_KEY_SHA256` in Railway. On startup the app creates an owner entry only if no active owner already exists; it never replaces existing keys or logs the raw key. Keep this hash private and remove the variable after the first successful sign-in. If an owner already exists, use that owner's key.
+
+Alternatively, after deployment, open a Railway shell/SSH session **in the running service with its volume mounted** and run:
 
 ```sh
 node dist/scripts/create-key.js "Server owner"

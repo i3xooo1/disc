@@ -18,6 +18,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, data TEXT NOT NULL);
     `);
   }
+  bootstrapOwner(keyHash: string) {
+    if (!/^[a-f0-9]{64}$/.test(keyHash)) throw new Error('BOOTSTRAP_OWNER_KEY_SHA256 must be a SHA-256 hash');
+    if (this.keys().some(key => key.owner && !key.revoked)) return false;
+    this.db.prepare('INSERT INTO keys(id,hash,label,owner,expires,created) VALUES(?,?,?,?,?,?)')
+      .run(randomUUID(), keyHash, 'Server owner', 1, null, Date.now());
+    return true;
+  }
   issueKey(label: string, owner = false, days: number | null = 30) {
     const key = `disc_${randomBytes(32).toString('base64url')}`;
     const id = randomUUID();

@@ -5,6 +5,7 @@ import { createApp } from './app.js';
 
 const settings = config();
 const store = new Store(settings.dataDir);
+if (process.env.BOOTSTRAP_OWNER_KEY_SHA256) store.bootstrapOwner(process.env.BOOTSTRAP_OWNER_KEY_SHA256);
 const gateway = settings.demo ? new DemoGateway() : await DiscordGateway.connect(settings.token, settings.guildId);
 if (!store.keys().some(k => k.owner && !k.revoked)) console.log('Create your owner access key in another terminal: npm run key:create -- "Server owner"');
 const app = createApp(store, gateway, settings);
